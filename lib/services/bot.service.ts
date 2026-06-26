@@ -1,7 +1,7 @@
-import Anthropic from "@anthropic-ai/sdk"
 import { Lead, ProjectType } from "@/lib/types"
 
-const client = new Anthropic()
+const XAI_API_KEY = process.env.XAI_API_KEY!
+const XAI_BASE_URL = "https://api.x.ai/v1"
 
 // System prompt utama bot sales
 function buildSystemPrompt(lead: Lead): string {
@@ -41,7 +41,7 @@ ${lead.project_description ? `Deskripsi project: ${lead.project_description}` : 
 Jawab hanya dalam bahasa Indonesia. Jangan keluar dari topik jasa coding.`
 }
 
-// Struktur respons bot — bisa berisi update lead dan pesan
+// Struktur respons bot
 export interface BotResponse {
   message: string
   leadUpdates?: Partial<{
@@ -59,19 +59,17 @@ export interface BotResponse {
   shouldNotifyNewLead?: boolean
 }
 
-// Generate respons dari Claude berdasarkan riwayat percakapan
+// Generate respons dari Grok berdasarkan riwayat percakapan
 export async function generateBotResponse(
   lead: Lead,
   conversationHistory: { role: "user" | "assistant"; content: string }[],
   userMessage: string
 ): Promise<BotResponse> {
-  // Tambahkan pesan user terbaru ke history
   const messages = [
     ...conversationHistory,
     { role: "user" as const, content: userMessage },
   ]
 
-  // Minta Claude balas dalam JSON terstruktur
   const systemPrompt = `${buildSystemPrompt(lead)}
 
 PENTING: Balas selalu dalam format JSON berikut, tanpa markdown, tanpa backtick:
@@ -99,23 +97,34 @@ Set status ke "negotiating" kalau customer mulai tanya harga atau nego.
 Set status ke "closed_won" kalau customer deal.
 Set status ke "closed_lost" kalau customer batalkan.`
 
-  const response = await client.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 1024,
-    system: systemPrompt,
-    messages,
+  const res = await fetch(`${XAI_BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${XAI_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "grok-3-mini",
+      messages: [
+        { role: "system", content: systemPrompt },
+        ...messages,
+      ],
+      max_tokens: 1024,
+    }),
   })
 
-  const rawText = response.content
-    .filter((b) => b.type === "text")
-    .map((b) => b.text)
-    .join("")
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(`Grok API error: ${JSON.stringify(err)}`)
+  }
+
+  const data = await res.json()
+  const rawText = data.choices?.[0]?.message?.content ?? ""
 
   try {
     const parsed = JSON.parse(rawText) as BotResponse
     return parsed
   } catch {
-    // Kalau parsing gagal, kembalikan sebagai plain message
     return { message: rawText }
   }
 }
