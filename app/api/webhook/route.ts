@@ -5,6 +5,9 @@ import { generateBotResponse } from "@/lib/services/bot.service"
 import { notifyNewLead, notifyClosing } from "@/lib/services/notification.service"
 import { sendWhatsAppMessage } from "@/lib/services/whatsapp.service"
 
+// Deduplication — simpan message ID yang sudah diproses (in-memory, cukup untuk Vercel)
+const processedMessageIds = new Set<string>()
+
 // GET — Verifikasi webhook dari Meta
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url)
@@ -42,8 +45,21 @@ export async function POST(req: NextRequest) {
     }
 
     const incomingMessage = messages[0]
+    const messageId = incomingMessage.id as string
     const waNumber = incomingMessage.from as string
     const messageType = incomingMessage.type as string
+
+    // Deduplication — skip kalau message ID sudah pernah diproses
+    if (processedMessageIds.has(messageId)) {
+      return NextResponse.json({ status: "duplicate ignored" })
+    }
+    processedMessageIds.add(messageId)
+
+    // Bersihkan set kalau sudah terlalu besar (hindari memory leak)
+    if (processedMessageIds.size > 1000) {
+      const arr = Array.from(processedMessageIds)
+      arr.slice(0, 500).forEach((id) => processedMessageIds.delete(id))
+    }
 
     // Handle pesan teks
     let messageText: string | null = null
@@ -51,12 +67,10 @@ export async function POST(req: NextRequest) {
     if (messageType === "text") {
       messageText = incomingMessage.text?.body ?? null
     } else if (messageType === "image") {
-      // Customer kirim gambar — anggap sebagai bukti transfer
       messageText = "[customer mengirim gambar — kemungkinan bukti transfer atau referensi]"
     } else if (messageType === "document") {
       messageText = "[customer mengirim dokumen]"
     } else {
-      // Abaikan tipe lain (audio, video, sticker, dll)
       return NextResponse.json({ status: "non-text ignored" })
     }
 
@@ -86,7 +100,6 @@ export async function POST(req: NextRequest) {
 
     // Update lead kalau ada info baru
     if (botResponse.leadUpdates && Object.keys(botResponse.leadUpdates).length > 0) {
-      // Hapus field kosong/null sebelum update
       const cleanUpdates = Object.fromEntries(
         Object.entries(botResponse.leadUpdates).filter(
           ([, v]) => v !== null && v !== undefined && v !== "" && !(Array.isArray(v) && v.length === 0)
@@ -114,7 +127,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ status: "ok" })
   } catch (err) {
     console.error("Webhook error:", err)
-    // Tetap return 200 ke Meta supaya tidak retry
     return NextResponse.json({ status: "error handled" }, { status: 200 })
   }
 }
