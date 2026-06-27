@@ -1,17 +1,13 @@
 import { NextRequest, NextResponse } from "next/server"
-import { upsertLeadByWaNumber, updateLead } from "@/lib/services/lead.service"
+import { upsertLeadByWaNumber, updateLead, getLeadByWaNumber } from "@/lib/services/lead.service"
 import { getConversations, saveMessage, formatForClaude } from "@/lib/services/conversation.service"
 import { generateBotResponse } from "@/lib/services/bot.service"
 import { notifyNewLead, notifyClosing } from "@/lib/services/notification.service"
 import { sendWhatsAppMessage } from "@/lib/services/whatsapp.service"
 
-// ============================================================
 // GET — Verifikasi webhook dari Meta
-// Meta akan hit endpoint ini saat kamu daftarkan webhook di dashboard
-// ============================================================
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url)
-
   const mode = searchParams.get("hub.mode")
   const token = searchParams.get("hub.verify_token")
   const challenge = searchParams.get("hub.challenge")
@@ -23,9 +19,7 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({ error: "Forbidden" }, { status: 403 })
 }
 
-// ============================================================
-// POST — Terima pesan masuk dari customer via Meta
-// ============================================================
+// POST — Terima pesan masuk dari customer
 export async function POST(req: NextRequest) {
   let body: any
 
@@ -35,66 +29,92 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 })
   }
 
-  // Ambil pesan dari payload Meta
-  const entry = body?.entry?.[0]
-  const changes = entry?.changes?.[0]
-  const value = changes?.value
-  const messages = value?.messages
-
-  // Kalau bukan pesan (misal status update), abaikan
-  if (!messages || messages.length === 0) {
-    return NextResponse.json({ status: "ignored" })
-  }
-
-  const incomingMessage = messages[0]
-  const waNumber = incomingMessage.from as string
-  const messageText = incomingMessage.text?.body as string
-
-  // Abaikan kalau bukan pesan teks
-  if (!messageText) {
-    return NextResponse.json({ status: "non-text ignored" })
-  }
-
+  // Selalu return 200 ke Meta supaya tidak retry terus
   try {
-    // 1. Dapatkan atau buat lead untuk nomor ini
-    const isNewLead = !(await import("@/lib/services/lead.service").then(m => m.getLeadByWaNumber(waNumber)))
-    const lead = await upsertLeadByWaNumber(waNumber)
+    const entry = body?.entry?.[0]
+    const changes = entry?.changes?.[0]
+    const value = changes?.value
+    const messages = value?.messages
 
-    // 2. Ambil riwayat percakapan
+    // Abaikan kalau bukan pesan masuk (misal: status update, read receipt)
+    if (!messages || messages.length === 0) {
+      return NextResponse.json({ status: "ignored" })
+    }
+
+    const incomingMessage = messages[0]
+    const waNumber = incomingMessage.from as string
+    const messageType = incomingMessage.type as string
+
+    // Handle pesan teks
+    let messageText: string | null = null
+
+    if (messageType === "text") {
+      messageText = incomingMessage.text?.body ?? null
+    } else if (messageType === "image") {
+      // Customer kirim gambar — anggap sebagai bukti transfer
+      messageText = "[customer mengirim gambar — kemungkinan bukti transfer atau referensi]"
+    } else if (messageType === "document") {
+      messageText = "[customer mengirim dokumen]"
+    } else {
+      // Abaikan tipe lain (audio, video, sticker, dll)
+      return NextResponse.json({ status: "non-text ignored" })
+    }
+
+    if (!messageText) {
+      return NextResponse.json({ status: "empty message" })
+    }
+
+    // Cek apakah lead baru
+    const existingLead = await getLeadByWaNumber(waNumber)
+    const isNewLead = !existingLead
+
+    // Dapatkan atau buat lead
+    const lead = existingLead ?? await upsertLeadByWaNumber(waNumber)
+
+    // Ambil riwayat percakapan
     const conversations = await getConversations(lead.id)
     const history = formatForClaude(conversations)
 
-    // 3. Simpan pesan customer
+    // Simpan pesan customer
     await saveMessage(lead.id, "user", messageText)
 
-    // 4. Generate respons dari Claude
+    // Generate respons dari AI
     const botResponse = await generateBotResponse(lead, history, messageText)
 
-    // 5. Simpan respons bot
+    // Simpan respons bot
     await saveMessage(lead.id, "assistant", botResponse.message)
 
-    // 6. Update lead kalau ada info baru dari Claude
+    // Update lead kalau ada info baru
     if (botResponse.leadUpdates && Object.keys(botResponse.leadUpdates).length > 0) {
-      await updateLead(lead.id, botResponse.leadUpdates)
+      // Hapus field kosong/null sebelum update
+      const cleanUpdates = Object.fromEntries(
+        Object.entries(botResponse.leadUpdates).filter(
+          ([, v]) => v !== null && v !== undefined && v !== "" && !(Array.isArray(v) && v.length === 0)
+        )
+      )
+      if (Object.keys(cleanUpdates).length > 0) {
+        await updateLead(lead.id, cleanUpdates as any)
+      }
     }
 
-    // 7. Kirim notif ke Voxy kalau lead baru
+    // Kirim notif ke Voxy kalau lead baru
     if (isNewLead || botResponse.shouldNotifyNewLead) {
-      await notifyNewLead(lead)
+      await notifyNewLead(lead).catch(console.error)
     }
 
-    // 8. Kirim notif closing ke Voxy
+    // Kirim notif closing ke Voxy
     if (botResponse.shouldNotifyClosing) {
       const updatedLead = { ...lead, ...botResponse.leadUpdates }
-      await notifyClosing(updatedLead as any)
+      await notifyClosing(updatedLead as any).catch(console.error)
     }
 
-    // 9. Balas ke customer via WA
+    // Balas ke customer via WA
     await sendWhatsAppMessage(waNumber, botResponse.message)
 
     return NextResponse.json({ status: "ok" })
   } catch (err) {
     console.error("Webhook error:", err)
-    return NextResponse.json({ error: "Internal error" }, { status: 500 })
+    // Tetap return 200 ke Meta supaya tidak retry
+    return NextResponse.json({ status: "error handled" }, { status: 200 })
   }
 }
