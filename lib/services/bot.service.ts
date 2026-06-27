@@ -211,7 +211,7 @@ ${context}
 
 PENTING: Balas HANYA dalam format JSON berikut, tanpa markdown, tanpa backtick:
 {
-  "message": "pesan ke customer — natural, santai, chat WA biasa. Boleh multi-baris pakai \\n",
+  "message": "pesan ke customer — natural, santai, chat WA biasa. Gunakan \\n\\n (double newline) untuk MEMISAH pesan yang harusnya dikirim terpisah. Contoh: 'bisaa ka\\n\\nprojectnya tentang apa ka' → ini akan dikirim sebagai DUA pesan terpisah dengan jeda 1.5 detik",
   "leadUpdates": {
     "name": "isi kalau customer sudah sebut nama",
     "project_type": "web|bot|automation|skripsi|fullstack",
