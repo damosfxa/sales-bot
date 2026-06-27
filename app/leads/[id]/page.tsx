@@ -10,6 +10,7 @@ import {
 import { notFound } from "next/navigation"
 import { ArrowLeft, Calendar, Link2 } from "lucide-react"
 import Link from "next/link"
+import { ProgressPanel } from "@/components/progress-panel"
 
 export default async function LeadDetailPage({
   params,
@@ -40,53 +41,58 @@ export default async function LeadDetailPage({
 
         <div className="grid grid-cols-3 gap-6">
           {/* Conversation */}
-          <div className="col-span-2">
-            <h1 className="text-lg font-semibold text-zinc-100 mb-4">
-              Percakapan
-            </h1>
+          <div className="col-span-2 space-y-6">
+            <div>
+              <h1 className="text-lg font-semibold text-zinc-100 mb-4">
+                Percakapan
+              </h1>
 
-            {convs.length === 0 ? (
-              <div className="bg-zinc-900 border border-zinc-800 rounded-xl px-5 py-12 text-center text-sm text-zinc-600">
-                Belum ada percakapan.
-              </div>
-            ) : (
-              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
-                {convs.map((c) => (
-                  <div
-                    key={c.id}
-                    className={`flex gap-3 ${c.role === "assistant" ? "flex-row-reverse" : ""}`}
-                  >
-                    {/* Avatar */}
+              {convs.length === 0 ? (
+                <div className="bg-zinc-900 border border-zinc-800 rounded-xl px-5 py-12 text-center text-sm text-zinc-600">
+                  Belum ada percakapan.
+                </div>
+              ) : (
+                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
+                  {convs.map((c) => (
                     <div
-                      className={`w-7 h-7 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-medium ${
-                        c.role === "user"
-                          ? "bg-zinc-700 text-zinc-300"
-                          : "bg-zinc-600 text-zinc-200"
-                      }`}
-                    >
-                      {c.role === "user" ? "U" : "B"}
-                    </div>
-
-                    {/* Bubble */}
-                    <div
-                      className={`max-w-sm ${c.role === "assistant" ? "items-end" : "items-start"} flex flex-col gap-1`}
+                      key={c.id}
+                      className={`flex gap-3 ${c.role === "assistant" ? "flex-row-reverse" : ""}`}
                     >
                       <div
-                        className={`px-3.5 py-2.5 rounded-xl text-sm leading-relaxed ${
+                        className={`w-7 h-7 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-medium ${
                           c.role === "user"
-                            ? "bg-zinc-800 text-zinc-200"
-                            : "bg-zinc-700 text-zinc-100"
+                            ? "bg-zinc-700 text-zinc-300"
+                            : "bg-zinc-600 text-zinc-200"
                         }`}
                       >
-                        {c.content}
+                        {c.role === "user" ? "U" : "B"}
                       </div>
-                      <p className="text-xs text-zinc-600 px-1">
-                        {formatDate(c.created_at)}
-                      </p>
+
+                      <div
+                        className={`max-w-sm ${c.role === "assistant" ? "items-end" : "items-start"} flex flex-col gap-1`}
+                      >
+                        <div
+                          className={`px-3.5 py-2.5 rounded-xl text-sm leading-relaxed whitespace-pre-wrap ${
+                            c.role === "user"
+                              ? "bg-zinc-800 text-zinc-200"
+                              : "bg-zinc-700 text-zinc-100"
+                          }`}
+                        >
+                          {c.content}
+                        </div>
+                        <p className="text-xs text-zinc-600 px-1">
+                          {formatDate(c.created_at)}
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Progress Panel — tampil kalau sudah closed_won */}
+            {lead.status === "closed_won" && (
+              <ProgressPanel leadId={lead.id} />
             )}
           </div>
 

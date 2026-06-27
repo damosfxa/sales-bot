@@ -4,8 +4,11 @@ import { getConversations, saveMessage, formatForClaude } from "@/lib/services/c
 import { generateBotResponse } from "@/lib/services/bot.service"
 import { notifyNewLead, notifyClosing } from "@/lib/services/notification.service"
 import { sendWhatsAppMessage } from "@/lib/services/whatsapp.service"
+import { supabase } from "@/lib/supabase"
 
-// Deduplication — simpan message ID yang sudah diproses (in-memory, cukup untuk Vercel)
+const DELAY_MS = 2 * 60 * 1000 // 2 menit
+
+// Deduplication
 const processedMessageIds = new Set<string>()
 
 // GET — Verifikasi webhook dari Meta
@@ -32,14 +35,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 })
   }
 
-  // Selalu return 200 ke Meta supaya tidak retry terus
   try {
     const entry = body?.entry?.[0]
     const changes = entry?.changes?.[0]
     const value = changes?.value
     const messages = value?.messages
 
-    // Abaikan kalau bukan pesan masuk (misal: status update, read receipt)
     if (!messages || messages.length === 0) {
       return NextResponse.json({ status: "ignored" })
     }
@@ -49,21 +50,18 @@ export async function POST(req: NextRequest) {
     const waNumber = incomingMessage.from as string
     const messageType = incomingMessage.type as string
 
-    // Deduplication — skip kalau message ID sudah pernah diproses
+    // Deduplication
     if (processedMessageIds.has(messageId)) {
       return NextResponse.json({ status: "duplicate ignored" })
     }
     processedMessageIds.add(messageId)
-
-    // Bersihkan set kalau sudah terlalu besar (hindari memory leak)
     if (processedMessageIds.size > 1000) {
       const arr = Array.from(processedMessageIds)
       arr.slice(0, 500).forEach((id) => processedMessageIds.delete(id))
     }
 
-    // Handle pesan teks
+    // Handle tipe pesan
     let messageText: string | null = null
-
     if (messageType === "text") {
       messageText = incomingMessage.text?.body ?? null
     } else if (messageType === "image") {
@@ -78,27 +76,76 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ status: "empty message" })
     }
 
-    // Cek apakah lead baru
+    const now = new Date()
+
+    // Cek apakah lead sudah ada
     const existingLead = await getLeadByWaNumber(waNumber)
     const isNewLead = !existingLead
-
-    // Dapatkan atau buat lead
     const lead = existingLead ?? await upsertLeadByWaNumber(waNumber)
 
-    // Ambil riwayat percakapan
+    // Simpan pesan customer dulu
+    await saveMessage(lead.id, "user", messageText)
+
+    // Update timestamp pesan terakhir + tandai pending
+    await supabase
+      .from("leads")
+      .update({
+        last_message_at: now.toISOString(),
+        pending_reply: true,
+      })
+      .eq("id", lead.id)
+
+    // Tunggu 2 menit
+    await new Promise((resolve) => setTimeout(resolve, DELAY_MS))
+
+    // Setelah delay, cek apakah ada pesan baru yang masuk
+    const { data: freshLead } = await supabase
+      .from("leads")
+      .select("last_message_at, pending_reply")
+      .eq("id", lead.id)
+      .single()
+
+    if (!freshLead?.pending_reply) {
+      // Sudah diproses oleh request lain
+      return NextResponse.json({ status: "superseded" })
+    }
+
+    const lastMsgAt = new Date(freshLead.last_message_at)
+    const secondsSinceLast = (Date.now() - lastMsgAt.getTime()) / 1000
+
+    if (secondsSinceLast < 110) {
+      // Ada pesan lebih baru yang masuk — skip, biarkan request lain yang proses
+      return NextResponse.json({ status: "waiting for more messages" })
+    }
+
+    // Tandai tidak pending lagi
+    await supabase
+      .from("leads")
+      .update({ pending_reply: false })
+      .eq("id", lead.id)
+
+    // Ambil semua percakapan terbaru (sudah include pesan-pesan yang masuk selama delay)
+    const freshLead2 = await getLeadByWaNumber(waNumber)
     const conversations = await getConversations(lead.id)
     const history = formatForClaude(conversations)
 
-    // Simpan pesan customer
-    await saveMessage(lead.id, "user", messageText)
+    // Generate satu respons untuk semua pesan yang masuk
+    const lastUserMessages = conversations
+      .filter((c) => c.role === "user")
+      .slice(-5)
+      .map((c) => c.content)
+      .join("\n")
 
-    // Generate respons dari AI
-    const botResponse = await generateBotResponse(lead, history, messageText)
+    const botResponse = await generateBotResponse(
+      freshLead2 ?? lead,
+      history.slice(0, -lastUserMessages.split("\n").length),
+      lastUserMessages
+    )
 
     // Simpan respons bot
     await saveMessage(lead.id, "assistant", botResponse.message)
 
-    // Update lead kalau ada info baru
+    // Update lead
     if (botResponse.leadUpdates && Object.keys(botResponse.leadUpdates).length > 0) {
       const cleanUpdates = Object.fromEntries(
         Object.entries(botResponse.leadUpdates).filter(
@@ -110,18 +157,18 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Kirim notif ke Voxy kalau lead baru
+    // Notif lead baru
     if (isNewLead || botResponse.shouldNotifyNewLead) {
       await notifyNewLead(lead).catch(console.error)
     }
 
-    // Kirim notif closing ke Voxy
+    // Notif closing
     if (botResponse.shouldNotifyClosing) {
       const updatedLead = { ...lead, ...botResponse.leadUpdates }
       await notifyClosing(updatedLead as any).catch(console.error)
     }
 
-    // Balas ke customer via WA
+    // Balas ke customer
     await sendWhatsAppMessage(waNumber, botResponse.message)
 
     return NextResponse.json({ status: "ok" })
